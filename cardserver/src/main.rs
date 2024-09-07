@@ -9,6 +9,9 @@ use tokio::io::AsyncReadExt;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     if std::env::var("AWS_LAMBDA_RUNTIME_API").is_ok() {
+
+
+
         lambda_runtime::run(service_fn(func)).await?;
     } else {
         // Mock Lambda input
@@ -24,10 +27,33 @@ async fn main() -> Result<(), Error> {
 
 async fn func(event: LambdaEvent<Value>) -> Result<Value, Error> {
 
+    // Print the event
+    println!("Received event: {:?}", event);
+
+    // check if event has name
+    let requested_card_name = match event.payload.get("queryStringParameters").and_then(|params| params.get("name")) {
+        Some(Value::String(name)) => name.to_string(),
+        _ => return Ok(json!({
+            "statusCode": 400,
+            "body": json!({
+                "message": "Name is required in url"
+            })
+        })),
+    };
+
+    if requested_card_name.is_empty() {
+        return Ok(json!({
+            "statusCode": 400,
+            "body": json!({
+                "message": "Name cannot be empty"
+            })
+        }));
+    }
+
+
     // check if on lambda
     let csv_reader: Vec<u8> = if std::env::var("AWS_LAMBDA_RUNTIME_API").is_ok() {
 
-        println!("on lambda");
         let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
         let config = aws_config::from_env().region(region_provider).load().await;
         let client = Client::new(&config);
@@ -131,9 +157,9 @@ async fn func(event: LambdaEvent<Value>) -> Result<Value, Error> {
     }
 
     println!("searching for card");
-    // get the card from the event
-    let card_name = event.payload["name"].as_str().unwrap_or("Name Not Supplied");
-    let card_name_lower = card_name.to_lowercase();
+
+
+    let card_name_lower = requested_card_name.to_lowercase();
     println!("searching for card: -{}-", card_name_lower);
 
     let found_card: Option<&Value> = cards_map.get(&card_name_lower);
@@ -141,7 +167,9 @@ async fn func(event: LambdaEvent<Value>) -> Result<Value, Error> {
     if found_card.is_none() {
         return Ok(json!({
             "statusCode": 404,
-            "body": format!("Card '{}' not found", card_name)
+            "body": json!({
+                "message": format!("Card '{}' not found", requested_card_name)
+            })
         }));
     }
 
@@ -167,7 +195,7 @@ fn decode_field(record: &csv::StringRecord, index: usize) -> Value {
     let decoded = general_purpose::STANDARD.decode(raw_value)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
-    
+
     if decoded.is_empty() {
         Value::Null
     } else {
@@ -184,45 +212,100 @@ mod tests {
     async fn test_func_existing_card() {
         // Mock event with an existing card name
         let event = LambdaEvent::new(
-            json!({"name": "Ancestor's Chosen"}),
+            json!({
+                "queryStringParameters": {
+                    "name": "Ancestor's Chosen"
+                }
+            }),
             Context::default()
         );
 
         let result = func(event).await.unwrap();
 
+        println!("result: {:?}", result);
+
+
         assert_eq!(result["statusCode"], 200);
-        assert!(result["body"].is_object());
-        assert_eq!(result["body"]["name"], "Ancestor's Chosen");
-        assert_eq!(result["body"]["cmc"], "7.0");
+        let body: Value = result["body"].clone();
+        println!("body: {:?}", body);
+        assert!(body.is_object());
+        assert_eq!(body["name"], "Ancestor's Chosen");
+        assert_eq!(body["cmc"], 7.0);
     }
 
     #[tokio::test]
     async fn test_func_nonexistent_card() {
         // Mock event with a non-existent card name
         let event = LambdaEvent::new(
-            json!({"name": "Nonexistent Card"}),
+            json!({
+                "queryStringParameters": {
+                    "name": "Nonexistent Card"
+                }
+            }),
             Context::default()
         );
 
         let result = func(event).await.unwrap();
-
+        println!("result: {:?}", result);
         assert_eq!(result["statusCode"], 404);
-        assert_eq!(result["body"], "Card 'Nonexistent Card' not found");
+        let body: Value = result["body"].clone();
+        assert_eq!(body["message"], "Card 'Nonexistent Card' not found");
     }
 
     #[tokio::test]
     async fn test_func_case_insensitive() {
         // Mock event with mixed case card name
         let event = LambdaEvent::new(
-            json!({"name": "bLaCk LoTuS"}),
+            json!({
+                "queryStringParameters": {
+                    "name": "bLaCk LoTuS"
+                }
+            }),
             Context::default()
         );
 
         let result = func(event).await.unwrap();
-
+        println!("result: {:?}", result);
         assert_eq!(result["statusCode"], 200);
-        assert!(result["body"].is_object());
-        assert_eq!(result["body"]["name"], "Black Lotus");
+        let body: Value = result["body"].clone();
+        assert!(body.is_object());
+        assert_eq!(body["name"], "Black Lotus");
+    }
+
+    #[tokio::test]
+    async fn test_func_no_name() {
+        // Mock event with no name
+        let event = LambdaEvent::new(
+            json!({
+                "queryStringParameters": {}
+            }),
+            Context::default()
+        );
+
+        let result = func(event).await.unwrap();
+        println!("result: {:?}", result);
+        assert_eq!(result["statusCode"], 400);
+        let body: Value = result["body"].clone();
+        assert_eq!(body["message"], "Name is required in url");
+    }
+
+    #[tokio::test]
+    async fn test_func_empty_name() {
+        // Mock event with an empty name
+        let event = LambdaEvent::new(
+            json!({
+                "queryStringParameters": {
+                    "name": ""
+                }
+            }),
+            Context::default()
+        );
+
+        let result = func(event).await.unwrap();
+        println!("result: {:?}", result);
+        assert_eq!(result["statusCode"], 400);
+        let body: Value = result["body"].clone();
+        assert_eq!(body["message"], "Name cannot be empty");
     }
 }
 
